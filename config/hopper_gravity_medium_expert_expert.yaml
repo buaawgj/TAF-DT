@@ -1,0 +1,74 @@
+alpha: 0.2
+batch_size: 128
+actor_lr: 0.0003
+critic_lr: 0.0003
+gamma: 0.99
+max_epochs_since_update_decay_interval: 150000.0
+
+state_dim: 17
+action_dim: 3
+hidden_sizes: 256
+max_action: 1
+
+temperature_opt: False
+
+tau: 0.005
+update_interval: 2
+expl_noise: 0.2
+
+eval_episode: 10
+eval_freq: 10000
+start_steps: 5000
+max_step: 1000000
+tar_env_interact_freq: 10
+
+device: cuda
+
+save_freq: 50000
+
+lam: 0.7
+temp: 3.0
+proportion: 0.25
+metric: 'cosine'
+
+env: Hopper-gravity
+
+runner:
+  filter_data:
+    seq_len: 5
+    dir: data/costs_5
+  experiment:
+    seed: 123
+    eta: 3.5
+    grad_norm: 5.0
+    K: 5
+    exp_name: qt
+    save_path: ./save/
+    max_iters: 500
+    num_steps_per_iter: 1000
+    lr_decay: true
+    early_stop: true
+    k_rewards: true
+    use_discount: true
+    v_target: true
+    use_mean_reduce: true
+    relabel_adv: true
+    rtg_no_q: true
+    adv_scale: 2.0
+    command_state_normalization: true
+    adv_mean_reduce: true
+    proportion: 0.5
+    ot_filter: true
+    ot_proportion: 0.5
+    pi_reg: true
+    pi_reg_weight: 0.6
+    training_normalization: true
+    rescale_reward: true
+    cql_weight: 0.1
+    use_cql_loss: true
+    use_full_pi_reg: true
+    use_weighted_qloss: true
+    vae_beta: 0.4
+
+tar_env_config:
+  env_name: Hopper-gravity

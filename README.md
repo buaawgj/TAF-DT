@@ -1,490 +1,335 @@
-# TAF-DT: Target-Aligned Fusion for Decision-Sequence Learning under Dynamics Shift
+# QT-off-dynamics: Q-value Regularized Transformer for Offline Dynamics Transfer
 
-This repository contains the research code for **Target-Aligned Fusion with a Decision Transformer backbone (TAF-DT)**. TAF-DT studies how a target-domain decision-sequence learner should absorb externally sourced trajectories when the source and target dynamics differ.
+A research implementation that extends the Q-value regularized Transformer (QT) for offline reinforcement learning to handle **dynamics transfer** scenarios, where an agent trained on one environment must adapt to environmental variations with limited target data.
 
-The implementation builds on the Q-value Regularized Transformer (QT) codebase and extends it to cross-domain offline reinforcement learning with:
+## Overview
 
-- **MMD-based fragment selection** for target-aligned state-structure filtering;
-- **OT-based feasibility weighting** for source transitions that are locally compatible with the target domain;
-- **Advantage-conditioned sequence tokens** as a more stable alternative to raw return-to-go tokens under source-target stitching;
-- **Weighted Q-regularized Decision Transformer training** under the same fused source-target distribution.
+This project adapts the QT method to address offline dynamics transfer by:
 
-> **Status.** This is a research codebase for the paper *Target-Aligned Fusion for Decision-Sequence Learning under Dynamics Shift*. The code still keeps some historical file names such as `QT`, `qt`, and `Q-value regularized Transformer`, because TAF-DT was developed by extending the QT implementation.
-
-## Contents
-
-- [Method Overview](#method-overview)
-- [Repository Structure](#repository-structure)
-- [Installation](#installation)
-- [Data Preparation](#data-preparation)
-- [Quick Start](#quick-start)
-- [Running Full Experiments](#running-full-experiments)
-- [Configuration](#configuration)
-- [Output and Analysis](#output-and-analysis)
-- [Main Results](#main-results)
-- [Citation](#citation)
-- [Acknowledgements](#acknowledgements)
-- [License](#license)
-
-## Method Overview
-
-TAF-DT follows a gate-then-weight fusion pipeline.
-
-1. **Target-aligned fragment gate.** Source trajectory fragments are ranked by a latent-space MMD score against target fragments. Fragments with smaller MMD are retained because their state structure is closer to the target domain.
-2. **Feasibility-aware transition weighting.** Retained source transitions are compared with target transitions through an OT cost. Lower-cost transitions receive larger Gibbs-style sampling weights.
-3. **Fused training distribution.** Target data and weighted source data are mixed into one empirical training distribution.
-4. **Advantage-conditioned tokenization.** Auxiliary value and Q functions are trained on the fused data. Their difference is used as an advantage token, replacing fragile return-to-go tokens in stitched source-target sequences.
-5. **Weighted Q-regularized Transformer training.** The final Decision Transformer policy is trained with behavior-cloning, Q-regularization, and optional policy regularization, all under the same target-aligned fused sampler.
-
-In the paper, the two data-side quantities controlled by this pipeline are the retained-fragment state-structure radius and the weighted source-to-target transport radius. In this codebase, these correspond operationally to the MMD filtering scores and OT feasibility scores computed before training.
-
-## Repository Structure
-
-```text
-.
-├── config/                         # YAML configs for environment and shift pairs
-├── data/
-│   └── target_dataset/             # Target-domain HDF5 datasets
-├── decision_transformer/           # DT/QT/TAF-DT model and trainer modules
-│   ├── evaluation/                 # Evaluation utilities
-│   ├── misc/                       # Dataset, command, and helper utilities
-│   ├── models/                     # Transformer, QL-DT, command network modules
-│   └── training/                   # Sequence and Q-learning trainers
-├── envs/                           # Modified MuJoCo environments and XML assets
-├── filter_data.py                  # MMD and OT cost computation
-├── filter_data_sas.py              # Alternative OT/MMD computation variant
-├── experiment.py                   # Single TAF-DT training entry point
-├── run_experiments.py              # Config-driven experiment launcher
-├── run_ablation_experiments.py     # Ablation experiment launcher
-├── analyze_training_progress.py    # Log parser and result summarizer
-├── requirements.txt                # Python dependencies
-└── README.md
-```
-
-## Installation
-
-The code uses the D4RL / Gym / MuJoCo offline RL stack. A Linux machine with an NVIDIA GPU is recommended.
-
-```bash
-conda create -n tafdt python=3.8 -y
-conda activate tafdt
-
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-The main dependencies include `torch`, `gym==0.23.1`, `d4rl`, `mujoco_py`, `transformers<=4.8.1`, `pot`, `h5py`, `pyyaml`, `scikit-learn`, and `torch-geometric`.
-
-If `mujoco_py` fails to build, please first make sure that MuJoCo, OpenGL, and compiler dependencies are correctly installed on your machine. The exact setup can vary across CUDA, driver, and Linux versions.
-
-## Data Preparation
-
-### Source datasets
-
-Source datasets use the standard D4RL naming convention and are loaded through D4RL, for example:
-
-- `halfcheetah-medium-v2`
-- `hopper-medium-replay-v2`
-- `walker2d-medium-expert-v2`
-- `ant-medium-v2`
-
-Supported source dataset types are:
-
-```text
-medium, medium-replay, medium-expert
-```
-
-### Target datasets
-
-Target-domain datasets should be placed under:
-
-```text
-data/target_dataset/
-```
-
-The expected target dataset types are:
-
-```text
-medium, medium_expert, expert
-```
-
-For command-line arguments, use `medium_expert` with an underscore for target data. The runner converts it into target dataset names such as:
-
-```text
-hopper_gravity_0.5_medium_expert.hdf5
-hopper_kinematic_medium_expert.hdf5
-hopper_morph_medium_expert.hdf5
-```
-
-The code supports three dynamics-shift families:
-
-| Shift type | Description | Example target name |
-|---|---|---|
-| `gravity` | modified gravity coefficient | `hopper_gravity_0.5_medium` |
-| `kinematic` | constrained joint ranges | `hopper_kinematic_medium` |
-| `morph` | modified body geometry / morphology | `hopper_morph_medium` |
-
-> **GitHub note.** HDF5 datasets and saved model checkpoints can be large. For a public repository, consider storing them through Git LFS, a release asset, or an external download link instead of committing all generated files directly.
+1. **Computing domain similarity costs** between source and target datasets using Optimal Transport (OT) and Maximum Mean Discrepancy (MMD)
+2. **Training with weighted sampling** where source data points more similar to the target domain receive higher sampling weights
+3. **Testing across multiple environments** and dynamics variations including gravity changes, kinematic modifications, and morphological alterations
 
 ## Quick Start
 
-### 1. Run a short smoke test
+### Installation
 
 ```bash
-python run_experiments.py \
-  --mode single \
-  --env hopper \
-  --variation gravity \
-  --srctype medium \
-  --tartype medium \
-  --short \
-  --cost-strategy isolate
+# Install all dependencies (including data processing and visualization packages)
+pip install -r requirements.txt
 ```
 
-The `--short` flag reduces the number of training iterations and is intended only for checking whether data loading, cost computation, and training can run end to end.
+### Basic Usage
 
-### 2. Run a single full experiment
+The project provides three execution modes through a unified runner:
 
 ```bash
-python run_experiments.py \
-  --mode single \
-  --env hopper \
-  --variation gravity \
-  --srctype medium \
-  --tartype medium \
-  --cost-strategy isolate
+# Run a single experiment
+python run_experiments.py --mode single --env hopper --variation gravity --srctype medium --tartype medium
+
+# Run core 9 experiments (all env-variation pairs with medium datasets)
+python run_experiments.py --mode core9 --num-workers 3
+
+# Run all 81 experiments (full grid)
+python run_experiments.py --mode full81 --num-workers 3
 ```
 
-This command first runs `filter_data.py` to compute MMD/OT costs, then runs `experiment.py` to train the TAF-DT policy.
+### Short Testing Mode
 
-### 3. Reuse existing cost files
+Add `--short` flag for quick testing with reduced iterations:
 
 ```bash
-python run_experiments.py \
-  --mode single \
-  --env hopper \
-  --variation gravity \
-  --srctype medium \
-  --tartype medium \
-  --cost-strategy reuse
+python run_experiments.py --mode core9 --short --num-workers 3
 ```
 
-The runner will reuse compatible cost files from `data/costs/` when available. If a compatible file is missing, it will recompute the costs.
+## Project Structure
 
-## Running Full Experiments
+### Core Scripts
 
-The unified runner supports four modes.
+- **`run_experiments.py`** - Unified experiment runner with config-driven execution
+- **`filter_data.py`** - Computes OT/MMD costs between source and target datasets  
+- **`experiment.py`** - Trains the QT model with domain adaptation
 
-### Single mode
+### Configuration
 
-Run one `(environment, shift, source type, target type)` setting.
+- **`config/`** - YAML configurations for each environment-variation pair
+  - Format: `{env}_{variation}.yaml` (e.g., `hopper_gravity.yaml`)
+  - Contains parameters for both data filtering and model training
 
-```bash
-python run_experiments.py \
-  --mode single \
-  --env ant \
-  --variation morph \
-  --srctype medium-expert \
-  --tartype expert
-```
+### Key Directories
 
-### Env9 mode
+- **`data/target_dataset/`** - Target environment datasets
+- **`data/costs_*/`** - Computed OT/MMD cost files
+- **`save/`** - Model checkpoints and experiment results
 
-Run all 9 source-target dataset combinations for one fixed environment and one fixed shift type.
+## Supported Environments
 
-```bash
-python run_experiments.py \
-  --mode env9 \
-  --env hopper \
-  --variation kinematic \
-  --num-workers 3 \
-  --cost-strategy reuse
-```
+| Environment | Variations |
+|-------------|------------|
+| **HalfCheetah** | gravity, kinematic, morph |
+| **Hopper** | gravity, kinematic, morph |
+| **Walker2D** | gravity, kinematic, morph |
 
-This mode sweeps:
+**Source Dataset Types (D4RL)**: `medium`, `medium-replay`, `medium-expert`  
+**Target Dataset Types**: `medium`, `expert`, `medium_expert`
 
-```text
-source: medium, medium-replay, medium-expert
-target: medium, medium_expert, expert
-```
+> **Note**: Source datasets come from D4RL and use the standard naming convention. Target datasets are custom variations with modified environment dynamics and use different naming (e.g., `medium_expert` instead of `medium-expert`).
 
-### Diff12 mode
+## Configuration System
 
-Run the 12 environment-shift pairs using one fixed source type and one fixed target type.
+### Config File Structure
 
-```bash
-python run_experiments.py \
-  --mode diff12 \
-  --srctype medium \
-  --tartype medium \
-  --num-workers 4 \
-  --cost-strategy reuse
-```
-
-The 12 pairs are:
-
-```text
-halfcheetah: gravity, kinematic, morph
-hopper:      gravity, kinematic, morph
-walker2d:    gravity, kinematic, morph
-ant:         gravity, kinematic, morph
-```
-
-### Full108 mode
-
-Run the full grid of 108 experiments: 4 environments × 3 shifts × 3 source types × 3 target types.
-
-```bash
-python run_experiments.py \
-  --mode full108 \
-  --num-workers 4 \
-  --cost-strategy reuse
-```
-
-When multiple workers are used, `filter_data.py` is protected by a process lock because OT/MMD preprocessing can be GPU-memory intensive. Training jobs can still run in parallel after cost computation.
-
-## Configuration
-
-Each environment-shift pair has a YAML file in `config/`, for example:
-
-```text
-config/hopper_gravity.yaml
-config/hopper_kinematic.yaml
-config/hopper_morph.yaml
-```
-
-A minimal relevant configuration block looks like this:
+Each environment-variation pair has a YAML configuration file in `config/` with the following structure:
 
 ```yaml
+# Environment-specific parameters (legacy SAC parameters, mostly unused in QT)
+alpha: 0.2
+batch_size: 128
+actor_lr: 0.0003
+critic_lr: 0.0003
+gamma: 0.99
+state_dim: 17
+action_dim: 3
+device: cuda
+env: "Hopper-morph"
+
+# Core QT configuration
 runner:
   filter_data:
-    seq_len: 20
-    dir: data/costs_20
-
+    seq_len: 5                   # Sequence length for cost computation (5 or 20)
+    dir: "data/costs_5"          # Directory to save/load cost files
+    
   experiment:
-    seed: 123
-    K: 20
-    eta: 3.5
-    max_iters: 500
-    num_steps_per_iter: 1000
-    lr_decay: true
-    early_stop: true
-
-    # TAF-DT fusion and training options
-    proportion: 0.5
-    ot_filter: true
-    ot_proportion: 0.5
-    use_weighted_qloss: true
-    relabel_adv: true
-    rtg_no_q: true
-    pi_reg: true
-    pi_reg_weight: 0.5
-    training_normalization: true
+    # Core training parameters
+    seed: 123                    # Random seed
+    eta: 3.5                     # Q-value regularization weight
+    max_iters: 500              # Maximum training iterations  
+    num_steps_per_iter: 1000    # Steps per training iteration
+    K: 5                        # Context length (matches seq_len)
+    
+    # Advanced training options
+    lr_decay: true              # Enable learning rate decay
+    early_stop: true            # Enable early stopping
+    grad_norm: 5.0              # Gradient clipping norm
+    adv_scale: 2.0              # Advantage scaling factor
+    
+    # Domain adaptation parameters
+    proportion: 0.5             # Proportion of target data to use
+    ot_filter: true             # Enable optimal transport filtering
+    ot_proportion: 0.5          # Proportion for OT filtering
+    pi_reg: true                # Enable policy regularization
+    pi_reg_weight: 1.0          # Policy regularization weight (varies by env)
+    
+    # Training features
+    use_discount: true          # Use discount factor
+    v_target: true              # Use value targets
+    k_rewards: true             # Use k-step rewards
+    rtg_no_q: true              # Return-to-go without Q-values
+    relabel_adv: true           # Relabel advantages
     command_state_normalization: true
-    expectile: 0.55
+    training_normalization: true
+    rescale_reward: true
+    use_mean_reduce: true
+    use_full_pi_reg: true
+    adv_mean_reduce: true
+    
+    # Paths
+    exp_name: "qt"
+    save_path: "./save/"
+
+# Target environment configuration
+tar_env_config:
+  env_name: "Hopper-morph"
+  # Optional environment-specific parameters
+  env_targets: [3600, 1800]     # Performance targets (kinematic only)
+  param:                        # Environment modifications (kinematic only)
+    torso jnt lower limit: [0.001]
+    foot jnt lower limit: [0.4] 
+    foot jnt upper limit: [0.4]
 ```
 
-The runner checks that `runner.filter_data.seq_len` and `runner.experiment.K` are consistent, because the cost files and Transformer context length must match.
+### Parameter Overrides
 
-### Override parameters from the command line
-
-Any config value can be overridden with dot notation:
+Override any config parameter from command line using dot notation:
 
 ```bash
-python run_experiments.py \
-  --mode single \
-  --env hopper \
-  --variation gravity \
-  --srctype medium \
-  --tartype medium \
-  --override experiment.eta=5.0 \
-  --override experiment.expectile=0.98 \
-  --override experiment.ot_proportion=0.5
+# Override core experiment parameters
+python run_experiments.py --mode single --env hopper --variation gravity \
+    --override experiment.eta=2.0 \
+    --override experiment.max_iters=1000 \
+    --override experiment.pi_reg_weight=0.8
+
+# Override sequence length and context
+python run_experiments.py --mode single --env hopper --variation morph \
+    --override filter_data.seq_len=10 \
+    --override experiment.K=10
+
+# Multiple overrides for batch experiments
+python run_experiments.py --mode core9 \
+    --override experiment.proportion=0.3 \
+    --override experiment.ot_proportion=0.3 \
+    --override experiment.adv_scale=1.5
 ```
 
-For matching MMD/OT sequence length and Transformer context length, override both fields together:
+## Advanced Usage
 
+### Running Individual Components
+
+**Compute costs only:**
 ```bash
-python run_experiments.py \
-  --mode single \
-  --env hopper \
-  --variation morph \
-  --srctype medium \
-  --tartype medium \
-  --override filter_data.seq_len=10 \
-  --override experiment.K=10
+python filter_data.py --env hopper --srctype medium --tartype gravity_0.5_medium \
+    --seq_len 20 --batch_size 10000
 ```
 
-### Cost strategies
-
-| Strategy | Behavior |
-|---|---|
-| `isolate` | Default. Save newly computed costs under the current result directory. |
-| `reuse` | Reuse compatible costs from `data/costs/`; recompute if missing or incompatible. |
-| `regenerate` | Always recompute costs under `data/costs/`. |
-
-## Running Individual Components
-
-### Compute MMD/OT costs only
-
+**Train model only (costs must exist):**
 ```bash
-python filter_data.py \
-  --env hopper \
-  --srctype medium \
-  --tartype gravity_0.5_medium \
-  --seq_len 20 \
-  --batch_size 10000 \
-  --dir ./data/costs
+python experiment.py --env hopper --dataset medium --tar_dataset gravity_0.5_medium \
+    --eta 3.5 --max_iters 500 --cost_dir ./data/costs_20
 ```
 
-Useful arguments include:
+## Execution Modes
 
-- `--ot-metric cosine`
-- `--mmd-metric rbf`
-- `--ot_method sinkhorn`
-- `--ot_reg 0.1`
-- `--mmd_step_type state`
-- `--ot_step_type all`
-
-### Train from precomputed costs
-
+### Single Mode
 ```bash
-python experiment.py \
-  --env hopper \
-  --dataset medium \
-  --tar_dataset gravity_0.5_medium \
-  --K 20 \
-  --eta 3.5 \
-  --max_iters 500 \
-  --num_steps_per_iter 1000 \
-  --lr_decay \
-  --early_stop \
-  --k_rewards \
-  --use_discount \
-  --v_target \
-  --use_mean_reduce \
-  --relabel_adv \
-  --rtg_no_q \
-  --adv_scale 2.0 \
-  --command_state_normalization \
-  --adv_mean_reduce \
-  --proportion 0.5 \
-  --ot_filter \
-  --ot_proportion 0.5 \
-  --pi_reg \
-  --pi_reg_weight 0.5 \
-  --training_normalization \
-  --rescale_reward \
-  --use_weighted_qloss \
-  --cost_dir ./data/costs
+python run_experiments.py --mode single --env hopper --variation gravity --srctype medium --tartype medium
 ```
 
-## Output and Analysis
-
-By default, the runner creates a timestamped directory such as:
-
-```text
-save/results_YYYYMMDD_HHMMSS/
-```
-
-A run directory may contain:
-
-- `run_experiments.log`: global launcher log;
-- `run_experiments_args_*.yaml`: command-line argument snapshot;
-- `config_snapshot_*.yaml`: exact config used by each experiment;
-- individual experiment logs when running in parallel;
-- `results_*.json`: success/failure summary and run duration;
-- `costs/`: MMD/OT cost files when `--cost-strategy isolate` is used;
-- model checkpoints and training outputs saved by `experiment.py`.
-
-### Analyze training logs
-
+### Core9 Mode  
+Runs 9 core experiments (3 environments × 3 variations) with specified dataset types:
 ```bash
-python analyze_training_progress.py \
-  --log-dir save/results_YYYYMMDD_HHMMSS \
-  --output analysis_results.md
+# Default: medium to medium
+python run_experiments.py --mode core9
+
+# Custom dataset types
+python run_experiments.py --mode core9 --srctype medium-replay --tartype expert
 ```
 
-Analyze a single log file:
-
+### Full81 Mode
+Runs complete grid (9 env-variation pairs × 3 source types × 3 target types):
 ```bash
-python analyze_training_progress.py \
-  --file save/results_YYYYMMDD_HHMMSS/hopper-gravity-medium-to-medium-*.log
+python run_experiments.py --mode full81
 ```
 
-The analysis script extracts training duration, maximum return, maximum normalized score, and last-10-iteration statistics.
+## Command Line Options
 
-## Main Results
+The `run_experiments.py` script supports the following options:
 
-The paper evaluates TAF-DT on D4RL-style MuJoCo control tasks under morphology, kinematic, and gravity shifts. The compact summary is:
+- **`--mode`**: Execution mode (`single`, `core9`, `full81`) - **Required**
+- **`--env`**: Environment name (e.g., `hopper`) - **Required for single mode**
+- **`--variation`**: Environment variation (e.g., `gravity`) - **Required for single mode**  
+- **`--srctype`**: Source dataset type (default: `medium`) - **Applies to all modes**
+- **`--tartype`**: Target dataset type (default: `medium`) - **Applies to all modes**
+- **`--short`**: Use short mode with reduced iterations for testing
+- **`--override`**: Override config parameters (format: `section.key=value`)
+- **`--output-dir`**: Specify directory for saving results (default: timestamped `save/results_*`)
+- **`--num-workers`**: Number of parallel workers for `core9` and `full81` modes (default: 1)
 
-| Shift type | TAF-DT total | Best competing total | TAF-DT wins |
-|---|---:|---:|---:|
-| Morphology | 2078.2 | 1274.3 (OTDF) | 31 / 36 |
-| Kinematic | 1900.6 | 1547.6 (OTDF) | 24 / 36 |
-| Gravity | 1347.3 | 1160.7 (OTDF) | 19 / 36 |
+## Output Management
 
-These results are reported over source qualities `{medium, medium-replay, medium-expert}` and target qualities `{medium, medium-expert, expert}` across HalfCheetah, Hopper, Walker2d, and Ant. The paper also reports stitch-junction diagnostics showing that TAF-DT reduces action jumps, Q-value jumps, and local TD residuals around source-target stitch boundaries.
+Each experiment run generates a timestamped directory containing:
+- **Configuration snapshots**: YAML files with the exact config used for each experiment
+- **Individual log files**: Detailed logs for each experiment (when run in parallel)
+- **Model checkpoints**: Saved model weights and training state
+- **Results summary**: JSON file with experiment outcomes and statistics
+- **Cost files**: Computed OT/MMD costs in `costs/` subdirectory
 
-## Common Issues
+## Key Features
 
-### Cost file shape mismatch
+- **Config-driven execution** - All parameters managed through YAML configs
+- **Parallel processing** - Multi-worker support for large experiment grids  
+- **Cost computation** - OT/MMD-based domain similarity measurement
+- **Weighted training** - Source data sampling based on target similarity
+- **Comprehensive logging** - Detailed experiment tracking and results
+- **Automated analysis** - Training progress extraction and statistical summarization
 
-If you see an error about cost file shape or `seq_len`, make sure these two config values match:
+## Results Analysis
 
-```yaml
-runner:
-  filter_data:
-    seq_len: 20
-  experiment:
-    K: 20
+### Training Progress Analysis
+
+The project includes a comprehensive analysis script for extracting and summarizing training progress from experiment logs:
+
+**`analyze_training_progress.py`** - Automated training progress analysis
+
+#### Usage
+
+**Analyze all experiments in default results directory:**
+```bash
+python analyze_training_progress.py
 ```
 
-If they do not match, regenerate the cost files.
-
-### Target dataset not found
-
-Check that the HDF5 file is under `data/target_dataset/` and follows the expected naming pattern, for example:
-
-```text
-hopper_gravity_0.5_medium.hdf5
-hopper_kinematic_medium.hdf5
-hopper_morph_medium.hdf5
+**Analyze specific log file:**
+```bash
+python analyze_training_progress.py --file save/results_20250822_224227/hopper-morph-medium-to-medium-20250823_064807.log
 ```
 
-### MuJoCo or D4RL import errors
+**Analyze specific results directory:**
+```bash
+python analyze_training_progress.py --log-dir save/results_20250822_224227/
+```
 
-Most environment issues come from `mujoco_py`, OpenGL, or old Gym/D4RL dependencies. Recheck your MuJoCo installation, GPU driver, and Python version. A clean conda environment is recommended.
+**Save output to markdown file:**
+```bash
+python analyze_training_progress.py --log-dir save/results_20250822_224227/ --output analysis_results.md
+```
+
+#### Output
+
+The script generates a markdown table with comprehensive statistics for each experiment:
+
+- **Experiment**: Name and configuration
+- **Status**: Success/failure with completion info
+- **Duration**: Total training time  
+- **Start Time**: Experiment start timestamp
+- **Max Return**: Highest achieved return value
+- **Max Score**: Highest normalized D4RL score
+- **Last 10 Iterations**: Statistics from final 10 training iterations
+  - Return (Max/Avg/Std): Return value statistics
+  - Score (Max/Avg/Std): Normalized score statistics
+
+#### Example Output
+
+```markdown
+| Experiment | Start | Duration(h) | Status | Iters | Return_Max | Return_L10Max | Return_L10Avg | Return_L10Std | Score_Max | Score_L10Max | Score_L10Avg | Score_L10Std |
+|------------|-------|-------------|---------|-------|------------|---------------|---------------|---------------|-----------|--------------|--------------|--------------|
+| hc-grav-m2m | 08-22 22:42 | 8.1 | ✓ | 101 | 331.4 | -215.0 | -230.9 | 12.2 | 6.25 | 0.67 | 0.50 | 0.124 |
+| hc-kin-m2m | 08-22 22:42 | 8.1 | ✓ | 101 | 2831.2 | 2810.1 | 2772.5 | 22.1 | 42.36 | 42.07 | 41.56 | 0.301 |
+| hc-morph-m2m | 08-22 22:42 | 8.1 | ✓ | 101 | 4189.9 | 4101.5 | 3950.2 | 116.8 | 44.73 | 43.84 | 42.33 | 1.169 |
+| hop-grav-m2m | 08-23 06:47 | 3.6 | ✓ | 101 | 3163.6 | 2143.9 | 1670.6 | 556.4 | 97.83 | 66.56 | 52.04 | 17.065 |
+| hop-kin-m2m | 08-23 06:47 | 3.9 | ✓ | 101 | 1889.1 | 1855.3 | 1393.2 | 256.0 | 66.76 | 65.58 | 49.48 | 8.923 |
+| hop-morph-m2m | 08-23 06:48 | 3.6 | ✓ | 101 | 2183.1 | 1896.1 | 1618.9 | 225.3 | 69.50 | 60.47 | 51.75 | 7.086 |
+| walker2d-gravity-102706 | 08-23 10:27 | N/A | ✗ | 0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.00 | 0.00 | 0.00 | 0.000 |
+| w2d-kin-m2m | 08-23 10:23 | N/A | ✗ | 75 | 2264.4 | 2199.4 | 1686.7 | 521.4 | 69.42 | 67.42 | 51.63 | 16.055 |
+| w2d-morph-m2m | 08-23 10:43 | N/A | ✗ | 69 | 2621.8 | 2442.1 | 2004.9 | 295.9 | 59.51 | 55.42 | 45.46 | 6.742 |
+
+```
+
+## Algorithm Details
+
+The method works in two stages:
+
+1. **Cost Computation** (`filter_data.py`):
+   - Computes Optimal Transport costs using Sinkhorn algorithm
+   - Calculates Maximum Mean Discrepancy with RBF kernels
+   - Generates cost files for weighted sampling during training
+
+2. **Model Training** (`experiment.py`):  
+   - Trains Decision Transformer with Q-value regularization
+   - Uses computed costs to weight source data sampling
+   - Adapts to target domain through similarity-based data filtering
 
 ## Citation
 
-If this repository is useful for your research, please cite the paper once it is publicly available. A provisional BibTeX entry is:
+This work builds upon the Q-value Regularized Transformer:
 
 ```bibtex
-@article{wang2026targetalignedfusion,
-  title   = {Target-Aligned Fusion for Decision-Sequence Learning under Dynamics Shift},
-  author  = {Wang, Guojian and Hon, Quinson and Chen, Xuyang and Zhao, Lin},
-  journal = {IEEE Transactions on Pattern Analysis and Machine Intelligence},
-  note    = {Under review},
-  year    = {2026}
+@inproceedings{QT,
+    title={Q-value Regularized Transformer for Offline Reinforcement Learning},
+    author={Hu, Shengchao and Fan, Ziqing and Huang, Chaoqin and Shen, Li and Zhang, Ya and Wang, Yanfeng and Tao, Dacheng},
+    booktitle={International Conference on Machine Learning},
+    year={2024},
 }
 ```
-
-This codebase also builds on QT:
-
-```bibtex
-@inproceedings{hu2024qvalueregularizedtransformer,
-  title     = {Q-value Regularized Transformer for Offline Reinforcement Learning},
-  author    = {Hu, Shengchao and Fan, Ziqing and Huang, Chaoqin and Shen, Li and Zhang, Ya and Wang, Yanfeng and Tao, Dacheng},
-  booktitle = {International Conference on Machine Learning},
-  year      = {2024}
-}
-```
-
-## Acknowledgements
-
-This repository benefits from prior implementations of Decision Transformer, Q-value Regularized Transformer, D4RL, and optimal-transport-based cross-domain offline RL. We thank the authors of these open-source projects for making their code available.
 
 ## License
 
-This project is released under the Apache 2.0 License. See `LICENSE` for details.
+Apache 2.0 License
